@@ -106,3 +106,96 @@ class LSTM:
         self.c -= self.lr/np.sqrt(self.Gc + 1e-8) * cu
         self.o -= self.lr/np.sqrt(self.Go + 1e-8) * ou
         return
+    
+    
+    
+    
+    
+    
+    
+    class_labels = pd.read_csv('labels.csv',encoding='utf-8')
+weighted_tfidf_score = pd.read_csv('tfidf_scores.csv',encoding='utf-8')
+sentiment_scores = pd.read_csv('sentiment_scores.csv',encoding='utf-8')
+dependency_features = pd.read_csv('dependency_features.csv',encoding='utf-8')
+char_bigrams = pd.read_csv('char_bigram_features.csv',encoding='utf-8')
+word_bigrams = pd.read_csv('word_bigram_features.csv',encoding='utf-8')
+tfidf_sparse_matrix = pd.read_csv('tfidf_features.csv',encoding='utf-8')
+
+#merge all feature data sets based on 'index' column sentiment_scores, dependency_features, char_bigrams, word_bigrams
+df_list=[class_labels, weighted_tfidf_score,sentiment_scores, dependency_features, char_bigrams, word_bigrams, tfidf_sparse_matrix]
+master = df_list[0]
+for df in df_list[1:]:
+    master = master.merge(df, on='index')
+
+master.columns.values
+#ignore first two columns (index and tweet)
+
+y=master.iloc[:,2] #class labels
+X=master.iloc[:,3:] #all features
+
+
+#create train and test sets: 80% train, 20% test
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+##########################################################################################
+#NOW WE CAN START MODELING
+from sklearn.metrics import roc_curve, auc, roc_auc_score, f1_score
+from sklearn import model_selection
+from sklearn.cross_validation import cross_val_score
+from sklearn.linear_model import LogisticRegressionCV
+from sklearn import svm
+from sklearn.neural_network import MLPClassifier
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import ExtraTreesClassifier
+from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.ensemble import AdaBoostClassifier
+from xgboost import XGBClassifier
+import lightgbm as lgb
+
+#Create a base training set to benchmark our performance (train set with hatespeech dictionary weighted tif-df score as only feature)
+x_base = pd.DataFrame(X_train.loc[:,'weighted_TFIDF_scores'])
+x_base_test = pd.DataFrame(X_test.loc[:,'weighted_TFIDF_scores'])
+
+# created scaled version of training and test data
+from sklearn.preprocessing import StandardScaler
+scaler = StandardScaler()
+scaler.fit(X_train)
+X_train_scale = scaler.transform(X_train)
+X_test_scale = scaler.transform(X_test)
+
+#initialize models
+lr = LogisticRegression(multi_class='multinomial', solver='lbfgs')
+gb = GradientBoostingClassifier(n_estimators=500, learning_rate=.025)
+xgb = XGBClassifier(learning_rate=.025, max_features=100)
+mlp = MLPClassifier(solver='lbfgs',hidden_layer_sizes=(80,40,40,10), activation='relu', random_state=1,learning_rate='adaptive', alpha=1e-6)
+rf= RandomForestClassifier(n_estimators=100, max_features=500)
+# 80,50,50,20
+
+#asses model performances using 5-fold cross validation and f1-score micro aveage as metric
+print("baseline model f1-score = ", cross_val_score(lr,x_base, y_train,cv=5,scoring="roc_auc").mean()) #benchmark model: linear regression using just tfidf score (weighted with hate dict)
+print("gb cross validation f1-score = ", cross_val_score(gb,x_base, y_train,cv=5,scoring="f1_micro").mean()) #gradient boost with just tf-df score
+print("rf cross validation f1-score = ", cross_val_score(rf,X_train,y_train,cv=5,scoring="f1_micro").mean()) #random forest with full train set (all features)
+print("xgb cross validation f1-score = ", cross_val_score(xgb,X_train,y_train,cv=5,scoring="f1_micro").mean()) #xgboost with full train set (all features)
+print("mlp cross validation f1-score = ", cross_val_score(mlp,X_train,y_train,cv=5,scoring="f1_micro").mean())
+
+#initialize ensembles
+estimators=[]
+estimators.append(('mlp', mlp))
+estimators.append(('rf', rf))
+estimators.append(('xgb', xgb))
+
+#voting ensemlbe
+ensemble = VotingClassifier(estimators, voting='soft',weights=[1,1,1])
+ensemble.fit(X_train, y_train)
+pred = ensemble.predict(X_test)
+print ('fscore:{0:.3f}'.format(f1_score(y_test, pred, average='micro')))
+
+#meta classifier ensemble
+stack = StackingCVClassifier(classifiers=[mlp, xgb, rf], cv=2,meta_classifier=lr, use_probas=True)
+stack.fit(X_train.values, y_train.values)
+pred2=stack.predict(X_test.values)
+print ('fscore:{0:.3f}'.format(f1_score(y_test, pred2, average='micro')))
+
+from sklearn.metrics import confusion_matrix
+confusion_lr = confusion_matrix(y_test, pred)
+print(confusion_lr)
